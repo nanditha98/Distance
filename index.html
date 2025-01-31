@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Distance Calculator</title>
+    <!-- Link to the external CSS file -->
+    <link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+    <h1>Calculate Road Distances</h1>
+    <form action="/calculate" method="post" enctype="multipart/form-data">
+        <h3>Choose Source CSV:</h3>
+        <label for="source_csv">Upload Source CSV:</label>
+        <input type="file" name="source_csv" id="source_csv" required><br><br>
+        <!-- Delete button for Source File -->
+        <button type="button" onclick="deleteFile('source_csv')">Delete Source File</button><br><br>
+
+        <h3>Choose Destination CSV:</h3>
+        <label for="destination_csv">Upload Destination CSV:</label>
+        <input type="file" name="destination_csv" id="destination_csv" required><br><br>
+        <!-- Delete button for Destination File -->
+        <button type="button" onclick="deleteFile('destination_csv')">Delete Destination File</button><br><br>
+
+        <button type="submit">Calculate Distances</button>
+    </form>
+
+    <script>
+        // Function to delete (reset) file input fields
+        function deleteFile(fileFieldName) {
+            // Reset the file input field, which is the equivalent of deleting the file
+            document.querySelector(`input[name=${fileFieldName}]`).value = '';
+        }
+    </script>
+</body>
+</html>

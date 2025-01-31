@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Calculation Result</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+</head>
+<body>
+    <div class="container mt-5">
+        <h2>Distance Calculation Complete</h2>
+        <p>Status: <strong>{{ status }}</strong></p>
+
+        <h4>Download the Results</h4>
+        <ul>
+            <li><a href="{{ url_for('download_file', filename=output_file) }}">Download Road Distances Output CSV</a></li>
+            <li><a href="{{ url_for('download_file', filename=invalid_source_file) }}">Download Invalid Source Rows CSV</a></li>
+            <li><a href="{{ url_for('download_file', filename=invalid_destination_file) }}">Download Invalid Destination Rows CSV</a></li>
+        </ul>
+
+        {% if quota_exceeded %}
+        <div class="alert alert-warning mt-3">
+            The quota for OpenRouteService API has been exceeded. Only partial results were generated.
+        </div>
+        {% endif %}
+
+        <p>Thank you for using our service!</p>
+    </div>
+</body>
+</html>
