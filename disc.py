@@ -1,205 +1,165 @@
 from flask import Flask, render_template, request, send_from_directory
 import os
 import csv
-import openrouteservice
+import requests
 import time
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Flask setup
-# ──────────────────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 app.config['OUTPUT_FOLDER'] = os.path.join(os.getcwd(), 'outputs')
-
-os.makedirs("uploads",               exist_ok=True)
+os.makedirs("uploads", exist_ok=True)
 os.makedirs(app.config['OUTPUT_FOLDER'], exist_ok=True)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Configuration
-# ──────────────────────────────────────────────────────────────────────────────
-API_KEY      = "5b3ce3597851110001cf6248242930a613eb44fba576aa3429a6f74b"
-BATCH_SIZE   = 40            # obey ORS rate‑limit
-quota_exceeded = False       # global flag
+BATCH_SIZE = 40
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Helper: read & validate one CSV (quotes removed, commas neutralised)
-# ──────────────────────────────────────────────────────────────────────────────
-def read_coordinates_from_csv(file_path: str, invalid_rows_file: str):
-    """
-    Returns a list of dicts:
-        {lat, lon, refno, address, coordinates}
-    – Removes surrounding " quotes in Address
-    – Replaces commas inside Address with spaces (so writer never re‑quotes)
-    """
-    coordinates, invalid_rows = [], []
+def reads_coordinates_from_csv(file_path, invalid_rows_file):
+    coordinates = []
+    invalid_rows = []
 
-    with open(file_path, "r", encoding="utf‑8") as f:
-        reader = csv.DictReader(f)
+    with open(file_path, 'r') as file:
+        reader = csv.DictReader(file)
+        fieldnames = reader.fieldnames
+
         for row in reader:
             try:
-                lat = float(row["Latitude"].strip())
-                lon = float(row["Longitude"].strip())
+                if "Address" in row:
+                    row["Address"] = row["Address"].strip().strip('"')
 
-                if not (-90  <= lat <= 90):
+                lat = float(row['Latitude'].strip())
+                lon = float(row['Longitude'].strip())
+
+                if not (-90 <= lat <= 90):
                     raise ValueError(f"Latitude {lat} out of range")
                 if not (-180 <= lon <= 180):
                     raise ValueError(f"Longitude {lon} out of range")
 
-                cleaned_address = (
-                    row["Address"]
-                    .strip()          # trim spaces
-                    .strip('"')       # strip leading / trailing "
-                    .replace(",", " ")  # neutralise commas so no quoting later
-                )
-
-                coordinates.append(
-                    dict(
-                        lat=lat,
-                        lon=lon,
-                        refno=row["RefNo"].strip(),
-                        address=cleaned_address,
-                        coordinates=(lon, lat),   # ORS wants (lon, lat)
-                    )
-                )
-
+                coordinates.append({
+                    'lat': lat,
+                    'lon': lon,
+                    'refno': str(int(float(row['RefNo']))),
+                    'coordinates': (lon, lat)
+                })
             except ValueError as e:
-                print(f"Invalid row skipped → {row}  ·  {e}")
+                print(f"Invalid row detected: {row} - Error: {e}")
                 invalid_rows.append(row)
 
-    # persist invalid rows for user download
     if invalid_rows:
-        with open(invalid_rows_file, "w", newline="", encoding="utf‑8") as bad:
-            writer = csv.DictWriter(bad, fieldnames=reader.fieldnames)
+        print(f"Writing invalid rows to {invalid_rows_file}")
+        with open(invalid_rows_file, 'w', newline='') as invalid_file:
+            writer = csv.DictWriter(invalid_file, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(invalid_rows)
-        print(f"✘ {len(invalid_rows)} invalid rows written to {invalid_rows_file}")
 
     return coordinates
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Distance calculation (ORS)
-# ──────────────────────────────────────────────────────────────────────────────
-def calculate_road_distance(api_key, coord1, coord2):
-    global quota_exceeded
-    client = openrouteservice.Client(key=api_key)
-    try:
-        result = client.directions([coord1, coord2])
-        dist_km = result["routes"][0]["summary"]["distance"] / 1000
-        return round(dist_km, 2)
-    except openrouteservice.exceptions.ApiError as e:
-        if "Quota exceeded" in str(e):
-            quota_exceeded = True
-            print("→ ORS quota exceeded – halting further calls")
-        else:
-            print(f"ORS ApiError {coord1}->{coord2} · {e}")
-        return None
-    except Exception as e:
-        print(f"Unexpected error {coord1}->{coord2} · {e}")
-        return None
-
-# ──────────────────────────────────────────────────────────────────────────────
-# CSV writer (result file)
-# ──────────────────────────────────────────────────────────────────────────────
-RESULT_HEADER = [
-    "Source RefNo", "Source Latitude", "Source Longitude", "Source Address",
-    "Destination RefNo", "Destination Latitude", "Destination Longitude",
-    "Destination Address", "Distance (km)"
-]
-
-def write_results_to_csv(output_file, rows):
+def write_results_to_csv(output_file, results):
     file_exists = os.path.exists(output_file)
-    with open(output_file, "a", newline="", encoding="utf‑8") as f:
-        writer = csv.writer(
-            f,
-            quoting=csv.QUOTE_NONE,   # we stripped commas, so no quotes needed
-            escapechar="\\",
-        )
+    with open(output_file, 'a', newline='') as file:
+        writer = csv.writer(file)
         if not file_exists:
-            writer.writerow(RESULT_HEADER)
-        writer.writerows(rows)
+            writer.writerow(['Source RefNo', 'Source Latitude', 'Source Longitude',
+                             'Destination RefNo', 'Destination Latitude', 'Destination Longitude', 'Distance (km)'])
+        for result in results:
+            writer.writerow(result)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Batch processor
-# ──────────────────────────────────────────────────────────────────────────────
-def process_batches(source, dest, api_key, output_file):
+def process_batches(source_coords, destination_coords, output_file):
     if not os.path.exists(output_file):
-        with open(output_file, "w", newline="", encoding="utf‑8") as f:
-            csv.writer(f, quoting=csv.QUOTE_NONE, escapechar="\\").writerow(RESULT_HEADER)
+        with open(output_file, 'w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow([
+                'Source RefNo', 'Source Latitude', 'Source Longitude',
+                'Destination RefNo', 'Destination Latitude', 'Destination Longitude',
+                'Distance (km)'
+            ])
 
-    for i in range(0, len(source), BATCH_SIZE):
-        for j in range(0, len(dest), BATCH_SIZE):
-            batch_rows = []
-            for s in source[i : i + BATCH_SIZE]:
-                for d in dest[j : j + BATCH_SIZE]:
-                    if quota_exceeded:
-                        return  # hard stop
-                    km = calculate_road_distance(api_key, s["coordinates"], d["coordinates"])
-                    if km is not None:
-                        batch_rows.append(
-                            [
-                                s["refno"], s["lat"], s["lon"], s["address"],
-                                d["refno"], d["lat"], d["lon"], d["address"],
-                                 round(km, 2)
-                              
-                              
-                            ]
-                        )
-            write_results_to_csv(output_file, batch_rows)
-            time.sleep(1)  # gentle on ORS
+    for source in source_coords:
+        for j in range(0, len(destination_coords), BATCH_SIZE):
+            dest_batch = destination_coords[j:j + BATCH_SIZE]
+            all_coords = [source['coordinates']] + [d['coordinates'] for d in dest_batch]
+            coords_param = ';'.join(f"{lon},{lat}" for lon, lat in all_coords)
+            url = f"http://router.project-osrm.org/table/v1/driving/{coords_param}?sources=0&annotations=distance"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Flask routes
-# ──────────────────────────────────────────────────────────────────────────────
+            try:
+                response = requests.get(url)
+                response.raise_for_status()
+                data = response.json()
+
+                if data["code"] == "Ok":
+                    distances = data["distances"][0]
+                    batch_results = []
+                    for dest, dist in zip(dest_batch, distances[1:]):
+                        km = round(dist / 1000, 2) if dist is not None else -1
+                        batch_results.append([
+                            source['refno'], source['lat'], source['lon'],
+                            dest['refno'], dest['lat'], dest['lon'],
+                            km
+                        ])
+                        print(f"\u2705 Distance: {source['refno']} → {dest['refno']} = {km} km")
+                    write_results_to_csv(output_file, batch_results)
+                else:
+                    print(f"⚠️ OSRM error response: {data}")
+            except Exception as e:
+                print(f"🚫 Error processing batch: {e}")
+
+            time.sleep(1)
+
 @app.route("/")
 def index():
     return render_template("index.html")
 
 @app.route("/calculate", methods=["POST"])
 def calculate():
-    global quota_exceeded
-    quota_exceeded = False
-
     if "source_csv" not in request.files or "destination_csv" not in request.files:
         return "Source or destination file missing", 400
 
-    src_file = request.files["source_csv"]
-    dst_file = request.files["destination_csv"]
-    if src_file.filename == "" or dst_file.filename == "":
+    source_file = request.files["source_csv"]
+    destination_file = request.files["destination_csv"]
+
+    if source_file.filename == "" or destination_file.filename == "":
         return "One or both files are empty", 400
 
-    src_path = os.path.join("uploads", src_file.filename)
-    dst_path = os.path.join("uploads", dst_file.filename)
-    src_file.save(src_path)
-    dst_file.save(dst_path)
+    source_path = os.path.join("uploads", source_file.filename)
+    destination_path = os.path.join("uploads", destination_file.filename)
+    source_file.save(source_path)
+    destination_file.save(destination_path)
 
-    # paths for invalid‑row logs
-    bad_src = os.path.join(app.config["OUTPUT_FOLDER"], "invalid_source_rows.csv")
-    bad_dst = os.path.join(app.config["OUTPUT_FOLDER"], "invalid_destination_rows.csv")
+    invalid_source_file = os.path.join(app.config['OUTPUT_FOLDER'], "invalid_source_rows.csv")
+    invalid_destination_file = os.path.join(app.config['OUTPUT_FOLDER'], "invalid_destination_rows.csv")
 
-    src_coords = read_coordinates_from_csv(src_path, bad_src)
-    dst_coords = read_coordinates_from_csv(dst_path, bad_dst)
+    print("Reading source CSV...")
+    source_coords = reads_coordinates_from_csv(source_path, invalid_source_file)
+    print(f"✅ Total valid source rows: {len(source_coords)}")
 
-    output_name = "road_distances_output.csv"
-    output_path = os.path.join(app.config["OUTPUT_FOLDER"], output_name)
+    print("Reading destination CSV...")
+    destination_coords = reads_coordinates_from_csv(destination_path, invalid_destination_file)
+    print(f"✅ Total valid destination rows: {len(destination_coords)}")
 
-    process_batches(src_coords, dst_coords, API_KEY, output_path)
+    output_file_name = "road_distances_output.csv"
+    output_file_path = os.path.join(app.config['OUTPUT_FOLDER'], output_file_name)
+
+    process_batches(source_coords, destination_coords, output_file_path)
 
     return render_template(
         "result.html",
-        output_file=output_name,
-        quota_exceeded=quota_exceeded,
-        invalid_source_file=os.path.basename(bad_src),
-        invalid_destination_file=os.path.basename(bad_dst),
-        status="Complete" if not quota_exceeded else "Partially Complete",
+        output_file=output_file_name,
+        quota_exceeded=False,
+        invalid_source_file="invalid_source_rows.csv",
+        invalid_destination_file="invalid_destination_rows.csv",
+        status="Complete"
     )
 
-@app.route("/download/<filename>")
+@app.route('/download/<filename>')
 def download_file(filename):
-    path = os.path.join(app.config["OUTPUT_FOLDER"], filename)
-    if not os.path.exists(path):
-        return f"File '{filename}' not found.", 404
-    return send_from_directory(app.config["OUTPUT_FOLDER"], filename, as_attachment=True)
+    try:
+        file_path = os.path.join(app.config['OUTPUT_FOLDER'], filename)
+        if os.path.exists(file_path):
+            print(f"File available for download: {file_path}")
+            return send_from_directory(app.config['OUTPUT_FOLDER'], filename, as_attachment=True)
+        else:
+            print(f"File not found: {file_path}")
+            return f"File '{filename}' not found.", 404
+    except Exception as e:
+        print(f"Error in file download: {str(e)}")
+        return f"Error: {str(e)}", 500
 
-# ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # debug=True but disable reloader so port 0 binding works in some IDEs
-    app.run(debug=True, use_reloader=False, port=0)
+    app.run(debug=True, use_debugger=False, port=0)
